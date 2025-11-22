@@ -33,6 +33,7 @@ class ScaledDotProductAttention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
         return_attention: bool = False
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
@@ -57,6 +58,11 @@ class ScaledDotProductAttention(nn.Module):
         # -> (batch, n_heads, seq_len_q, seq_len_k)
         scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
         
+        # Aplicar bias (p. ej. ALiBi) si se pasa
+        if bias is not None:
+            # bias esperado con shape broadcastable a scores
+            scores = scores + bias
+
         # Aplicar máscara (poner -inf donde mask == 0 o False)
         if mask is not None:
             # Si la máscara es booleana, convertir: True -> 0, False -> -inf

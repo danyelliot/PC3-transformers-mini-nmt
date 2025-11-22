@@ -102,15 +102,11 @@ class RotaryPositionalEmbedding(nn.Module):
         """Pre-computa cache de cos y sin para eficiencia."""
         t = torch.arange(seq_len, dtype=self.inv_freq.dtype, device=self.inv_freq.device)
         t = t / self.scaling_factor  # Aplicar scaling
-        
         freqs = torch.outer(t, self.inv_freq)  # (seq_len, dim/2)
-        
-        # Concatenar para tener (seq_len, dim)
-        emb = torch.cat([freqs, freqs], dim=-1)
-        
-        # Registrar como buffers
-        self.register_buffer('cos_cached', emb.cos()[None, None, :, :], persistent=False)
-        self.register_buffer('sin_cached', emb.sin()[None, None, :, :], persistent=False)
+
+        # Guardar cos y sin con tamaño (1,1,seq_len, dim/2) para multiplicar con mitades de la cabeza
+        self.register_buffer('cos_cached', freqs.cos()[None, None, :, :], persistent=False)
+        self.register_buffer('sin_cached', freqs.sin()[None, None, :, :], persistent=False)
     
     def forward(
         self,

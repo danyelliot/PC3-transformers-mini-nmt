@@ -38,10 +38,13 @@ class MultiHeadAttention(nn.Module):
         
         # Proyección de salida
         self.out_linear = nn.Linear(d_model, d_model)
-        
         # Atención scaled dot-product
         self.attention = ScaledDotProductAttention(dropout=dropout)
-        
+
+        # Positional helpers (pueden ser inyectados desde Transformer)
+        self.rotary = None  # tipo: Optional[RotaryPositionalEmbedding]
+        self.alibi = None   # tipo: Optional[ALiBiPositionalBias]
+
         self.dropout = nn.Dropout(dropout)
         
     def forward(
@@ -81,9 +84,33 @@ class MultiHeadAttention(nn.Module):
         V = V.view(batch_size, -1, self.n_heads, self.head_dim).transpose(1, 2)
         
         # Aplicar atención
+        # Aplicar rotatory positional embedding si está disponible
+        if self.rotary is not None:
+            try:
+                Q, K = self.rotary(Q, K)
+            except Exception:
+                # en caso de que rotary espere shapes distintas, intentar con seq_len
+                seq_len_q = Q.size(2)
+                Q, K = self.rotary(Q, K, seq_len=seq_len_q)
+
+        # Preparar bias (ALiBi) si existe
+        bias = None
+        if self.alibi is not None:
+            # alibi.forward espera seq_len y retorna (1, n_heads, seq_len, seq_len)
+            seq_len_q = Q.size(2)
+            seq_len_k = K.size(2)
+            # Si shapes difieren (cross-attention), recomputar bias apropiado
+            if seq_len_q == seq_len_k:
+                bias = self.alibi(seq_len_q)
+            else:
+                # generar bias para la mayor de las longitudes y slice según necesidad
+                max_len = max(seq_len_q, seq_len_k)
+                full = self.alibi(max_len)
+                bias = full[:, :, :seq_len_q, :seq_len_k]
+
         # output: (batch, n_heads, seq_len_q, head_dim)
         # attn_weights: (batch, n_heads, seq_len_q, seq_len_k)
-        attn_output, attn_weights = self.attention(Q, K, V, mask, return_attention)
+        attn_output, attn_weights = self.attention(Q, K, V, mask, bias=bias, return_attention=return_attention)
         
         # Concatenar cabezas
         # (batch, n_heads, seq_len_q, head_dim) -> (batch, seq_len_q, n_heads, head_dim)

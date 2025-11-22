@@ -123,12 +123,19 @@ class EncoderLayer(nn.Module):
         d_model: int,
         nhead: int,
         dim_feedforward: int,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        rotary=None,
+        alibi=None
     ):
         super().__init__()
         
         # Self-attention
         self.self_attn = MultiHeadSelfAttention(d_model, nhead, dropout)
+        # inyectar pos-encodings si son provistos
+        if rotary is not None:
+            self.self_attn.rotary = rotary
+        if alibi is not None:
+            self.self_attn.alibi = alibi
         
         # Feed-forward
         self.ffn = FeedForwardNetwork(d_model, dim_feedforward, dropout)
@@ -185,15 +192,23 @@ class DecoderLayer(nn.Module):
         d_model: int,
         nhead: int,
         dim_feedforward: int,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        rotary=None,
+        alibi=None
     ):
         super().__init__()
         
         # Masked self-attention (causal)
         self.self_attn = MultiHeadSelfAttention(d_model, nhead, dropout)
-        
         # Cross-attention al encoder
         self.cross_attn = MultiHeadCrossAttention(d_model, nhead, dropout)
+        # inyectar pos-encodings si son provistos
+        if rotary is not None:
+            self.self_attn.rotary = rotary
+            self.cross_attn.rotary = rotary
+        if alibi is not None:
+            self.self_attn.alibi = alibi
+            self.cross_attn.alibi = alibi
         
         # Feed-forward
         self.ffn = FeedForwardNetwork(d_model, dim_feedforward, dropout)
@@ -210,7 +225,8 @@ class DecoderLayer(nn.Module):
         x: torch.Tensor,
         encoder_output: torch.Tensor,
         tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None
+        memory_mask: Optional[torch.Tensor] = None,
+        return_attention: bool = False
     ) -> torch.Tensor:
         """
         Args:
@@ -227,19 +243,25 @@ class DecoderLayer(nn.Module):
         x = self.norm1(x)
         x, _ = self.self_attn(x, mask=tgt_mask)
         x = residual + x
-        
+
         # Pre-norm + Cross-Attention + Residual
         residual = x
         x = self.norm2(x)
-        x, _ = self.cross_attn(x, encoder_output, mask=memory_mask)
+        if return_attention:
+            x, cross_attn = self.cross_attn(x, encoder_output, mask=memory_mask, return_attention=True)
+        else:
+            x, _ = self.cross_attn(x, encoder_output, mask=memory_mask)
+            cross_attn = None
         x = residual + x
-        
+
         # Pre-norm + FFN + Residual
         residual = x
         x = self.norm3(x)
         x = self.ffn(x)
         x = residual + x
-        
+
+        if return_attention:
+            return x, cross_attn
         return x
 
 
@@ -248,14 +270,16 @@ class Encoder(nn.Module):
     Stack de capas del Encoder.
     """
     
-    def __init__(self, config: TransformerConfig):
+    def __init__(self, config: TransformerConfig, rotary=None, alibi=None):
         super().__init__()
         self.layers = nn.ModuleList([
             EncoderLayer(
                 d_model=config.d_model,
                 nhead=config.nhead,
                 dim_feedforward=config.dim_feedforward,
-                dropout=config.dropout
+                dropout=config.dropout,
+                rotary=rotary,
+                alibi=alibi
             )
             for _ in range(config.num_encoder_layers)
         ])
@@ -286,14 +310,16 @@ class Decoder(nn.Module):
     Stack de capas del Decoder.
     """
     
-    def __init__(self, config: TransformerConfig):
+    def __init__(self, config: TransformerConfig, rotary=None, alibi=None):
         super().__init__()
         self.layers = nn.ModuleList([
             DecoderLayer(
                 d_model=config.d_model,
                 nhead=config.nhead,
                 dim_feedforward=config.dim_feedforward,
-                dropout=config.dropout
+                dropout=config.dropout,
+                rotary=rotary,
+                alibi=alibi
             )
             for _ in range(config.num_decoder_layers)
         ])
@@ -305,7 +331,8 @@ class Decoder(nn.Module):
         x: torch.Tensor,
         encoder_output: torch.Tensor,
         tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None
+        memory_mask: Optional[torch.Tensor] = None,
+        return_attention: bool = False
     ) -> torch.Tensor:
         """
         Args:
@@ -317,10 +344,24 @@ class Decoder(nn.Module):
         Returns:
             output: (batch, tgt_len, d_model)
         """
+        # Support optionally returning cross-attention weights from each layer
+        attn_list = []
         for layer in self.layers:
-            x = layer(x, encoder_output, tgt_mask, memory_mask)
-        
-        return self.norm(x)
+            if isinstance(layer, DecoderLayer):
+                # propagate the return_attention flag to each layer
+                if return_attention:
+                    x, attn = layer(x, encoder_output, tgt_mask, memory_mask, return_attention=True)
+                    attn_list.append(attn)
+                else:
+                    x = layer(x, encoder_output, tgt_mask, memory_mask, return_attention=False)
+            else:
+                # Fallback: call layer without attention
+                x = layer(x, encoder_output, tgt_mask, memory_mask)
+
+        x = self.norm(x)
+        if return_attention:
+            return x, attn_list
+        return x
 
 
 class Transformer(nn.Module):
@@ -358,9 +399,22 @@ class Transformer(nn.Module):
                 pad_idx=config.pad_idx
             )
         
-        # Encoder y Decoder
-        self.encoder = Encoder(config)
-        self.decoder = Decoder(config)
+        # Preparar pos-encodings para inyectar en las capas
+        if config.pos_encoding == 'rope':
+            head_dim = config.d_model // config.nhead
+            self.rotary = RotaryPositionalEmbedding(dim=head_dim, max_seq_len=config.max_seq_length)
+        else:
+            self.rotary = None
+
+        # ALiBi si es necesario (crear antes de construir capas)
+        if config.pos_encoding == "alibi":
+            self.alibi = ALiBiPositionalBias(config.nhead, config.max_seq_length)
+        else:
+            self.alibi = None
+
+        # Encoder y Decoder (inyectar rotary/alibi si aplica)
+        self.encoder = Encoder(config, rotary=self.rotary, alibi=self.alibi)
+        self.decoder = Decoder(config, rotary=self.rotary, alibi=self.alibi)
         
         # Proyección final a vocabulario
         self.output_projection = nn.Linear(config.d_model, config.vocab_size_tgt)
@@ -471,7 +525,8 @@ class Transformer(nn.Module):
         tgt: torch.Tensor,
         encoder_output: torch.Tensor,
         tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None
+        memory_mask: Optional[torch.Tensor] = None,
+        return_attention: bool = False
     ) -> torch.Tensor:
         """
         Un paso de decodificación (útil para generación autoregresiva).
@@ -488,16 +543,34 @@ class Transformer(nn.Module):
         tgt_len = tgt.size(1)
         device = tgt.device
         
+        # default causal mask if not provided
         if tgt_mask is None:
             causal_mask = create_causal_mask(tgt_len, device)
             causal_mask = causal_mask.unsqueeze(0).unsqueeze(1)
             tgt_mask = causal_mask
-        
+
         tgt_emb = self.tgt_embedding(tgt)
-        decoder_output = self.decoder(tgt_emb, encoder_output, tgt_mask, memory_mask)
-        logits = self.output_projection(decoder_output)
-        
-        return logits
+        # Allow optionally returning attention weights from cross-attention
+        # Keep backward compatibility: default return only logits
+        # If caller passed return_attention=True, forward that flag to decoder
+        decoder_result = self.decoder(tgt_emb, encoder_output, tgt_mask, memory_mask, return_attention=return_attention)
+        if isinstance(decoder_result, tuple):
+            decoder_output, attn_list = decoder_result
+            logits = self.output_projection(decoder_output)
+            # Aggregate attentions across layers by averaging (skip None)
+            valid_attns = [a for a in attn_list if a is not None]
+            if valid_attns:
+                # stack -> (n_layers, batch, n_heads, tgt_len, src_len)
+                attn_stack = torch.stack(valid_attns, dim=0)
+                # mean over layers -> (batch, n_heads, tgt_len, src_len)
+                attn_agg = attn_stack.mean(dim=0)
+            else:
+                attn_agg = None
+
+            return logits, attn_agg
+        else:
+            logits = self.output_projection(decoder_result)
+            return logits
 
 
 def create_transformer_from_config(config_dict: dict) -> Transformer:

@@ -341,3 +341,14 @@ Pendiente:
 - Generación de gráficos comparativos
 - Video demostrativo
 - Presentación para exposición
+
+Quick demo
+----------
+Hay un script de ejemplo que ejecuta un encode + greedy decode en batch pequeño:
+
+```bash
+# Ejecutar el demo (desde la raíz del repo)
+python3 examples/run_demo.py
+```
+
+El script imprime la forma del `src` de entrada y la salida generada. Es un punto de partida rápido para verificar que el pipeline de encode+decode funciona en CPU.

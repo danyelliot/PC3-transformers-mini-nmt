@@ -198,7 +198,14 @@ class Decoder:
         
         for step in range(self.config.max_length):
             # Decodificar
-            logits = self.model.decode_step(beams, encoder_output, memory_mask=src_mask)
+            decode_result = self.model.decode_step(beams, encoder_output, memory_mask=src_mask, return_attention=True)
+            # decode_result can be (logits, attn) or logits
+            if isinstance(decode_result, tuple):
+                logits, attn_weights = decode_result
+            else:
+                logits = decode_result
+                attn_weights = None
+
             next_token_logits = logits[:, -1, :]  # (batch * beam_size, vocab_size)
             
             # Aplicar temperature
@@ -252,6 +259,13 @@ class Decoder:
                         # Aplicar length penalty
                         length = len(new_seq)
                         normalized_score = score / (length ** self.config.length_penalty)
+                        # Aplicar coverage penalty aproximada basada en la cobertura acumulada
+                        if 'coverage' in locals() and coverage is not None:
+                            # cobertura del beam padre
+                            cov_idx = beam_idx_for_batch + beam_idx
+                            cov_vec = coverage[cov_idx]
+                            cov_pen = -torch.log(cov_vec + 1e-10).sum().item() * self.config.coverage_penalty
+                            normalized_score = normalized_score - cov_pen
                         finished_beams[batch_idx].append((normalized_score, new_seq))
                     else:
                         active_beams.append((score, new_seq, beam_idx))
@@ -287,6 +301,19 @@ class Decoder:
             # Early stopping si todos los batches tienen beams terminados
             if self.config.early_stopping and all(len(fb) >= beam_size for fb in finished_beams):
                 break
+
+            # Actualizar coverage: si obtuvimos attn_weights, sumar la atención del último paso
+            # attn_weights: (batch*beam, n_heads, tgt_len, src_len)
+            if attn_weights is not None:
+                # tomar los pesos del último token generado (última posición en tgt_len)
+                last_attn = attn_weights[:, :, -1, :]  # (batch*beam, n_heads, src_len)
+                # promedio sobre cabezas
+                last_attn_avg = last_attn.mean(dim=1)  # (batch*beam, src_len)
+                # inicializar coverage si no existe
+                if 'coverage' not in locals() or coverage is None:
+                    src_len = encoder_output.size(1)
+                    coverage = torch.zeros(batch_size * beam_size, src_len, device=self.device)
+                coverage = coverage + last_attn_avg
         
         # Seleccionar mejores secuencias
         results = []
