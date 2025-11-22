@@ -1,0 +1,63 @@
+# Configuración para NMT Transformer (Opción B)
+
+# Modelo
+model:
+  d_model: 256              # Dimensión del modelo
+  nhead: 8                  # Número de cabezas de atención
+  num_encoder_layers: 4     # Capas del encoder
+  num_decoder_layers: 4     # Capas del decoder
+  dim_feedforward: 1024     # Dimensión de la FFN
+  dropout: 0.1              # Dropout rate
+  max_seq_length: 128       # Longitud máxima de secuencia
+  vocab_size_src: 10000     # Tamaño del vocabulario source
+  vocab_size_tgt: 10000     # Tamaño del vocabulario target
+  pos_encoding: "sinusoidal"  # sinusoidal, rope, alibi
+  share_embeddings: false   # Compartir embeddings src-tgt
+
+# Datos
+data:
+  dataset: "tatoeba"        # Dataset a usar
+  src_lang: "es"            # Idioma fuente
+  tgt_lang: "en"            # Idioma destino
+  max_samples: 20000        # Máximo de muestras
+  train_split: 0.8          # 80% train
+  val_split: 0.1            # 10% val
+  test_split: 0.1           # 10% test
+  batch_size: 32            # Batch size
+  num_workers: 2            # Workers para DataLoader
+
+# Entrenamiento
+training:
+  epochs: 30                # Número de épocas
+  learning_rate: 0.0001     # LR inicial
+  warmup_steps: 1000        # Steps de warmup
+  max_grad_norm: 1.0        # Gradient clipping
+  label_smoothing: 0.1      # Label smoothing
+  weight_decay: 0.01        # Weight decay
+  early_stopping_patience: 5  # Patience para early stopping
+  save_every: 5             # Guardar checkpoint cada N épocas
+  use_amp: true             # Mixed precision training
+  scheduler: "cosine"       # warmup_cosine, linear, constant
+
+# Decodificación
+decoding:
+  strategy: "beam"          # greedy, beam, topk, topp
+  beam_size: 4              # Ancho del beam
+  length_penalty: 0.6       # Penalización por longitud
+  coverage_penalty: 0.2     # Penalización de cobertura
+  repetition_penalty: 1.2   # Penalización por repetición
+  frequency_penalty: 0.0    # Penalización por frecuencia
+  temperature: 1.0          # Temperatura para sampling
+  top_k: 50                 # Top-k para sampling
+  top_p: 0.92               # Top-p (nucleus) para sampling
+  max_length: 128           # Longitud máxima de generación
+  min_length: 1             # Longitud mínima
+
+# Sistema
+system:
+  seed: 42                  # Semilla para reproducibilidad
+  device: "auto"            # auto, cpu, cuda, mps
+  checkpoint_dir: "checkpoints"
+  output_dir: "outputs"
+  log_every: 100            # Log cada N steps
+  eval_every: 500           # Eval cada N steps
